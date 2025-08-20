@@ -1,0 +1,412 @@
+## ========================================================================== ##
+# Project: Health Equity Payment
+
+# Team: Improvement Analytics Unit (IAU) at the Health Foundation
+
+# Script: clean_llr_data.R
+
+# Corresponding author:Sarah Opie-Martin (sarah.opie-martin@health.org.uk)
+
+# Description:
+# Create datasets with LLR payments data, LLR excluded practices and LLR payment amount key
+
+# Dependencies:
+#
+
+# Inputs:
+# raw data from LLR on payments
+# raw public data
+
+# Outputs:
+# Dataset ready for descriptives and causal analysis
+
+# Notes:
+## ========================================================================== ##
+
+source("~/iaheq1/preamble.R")
+
+## LLR data ------------------
+
+## load table 1 data - this contains the data itself and a comments field with information on which practices are excluded
+heq_practices <- read.csv("llr_data/Table1_to_send_to_HF.csv") %>%
+  rename(
+    Payment_21_22 = In.receipt.of.Health.Equity.Payment.2021.22,
+    Payment_22_23 = In.receipt.of.HEP.2022.23,
+    Payment_23_24 = In.receipt.of.HEP.2023.24,
+    Payment_24_25 = In.receipt.of.HEP.2024.25,
+    In_scheme_21_22 = In.scheme.2021.22,
+    In_scheme_22_23 = In.scheme.2022.23,
+    In_scheme_23_24 = In.scheme.2023.24,
+    In_scheme_24_25 = In.scheme.2024.25,
+    Note = NOTE
+  )
+
+## second table contains information on how much funding each practice received
+## also includes a key and summary stats - keeping the key in a separate table
+heq_payment_amount <- read.csv("llr_data/Table2_to_send_to_HF.csv", skip = 1) %>%
+  rename(
+    Amount_21_22 = Financial.Year.21.22,
+    Amount_22_23 = Financial.Year.22.23,
+    Amount_23_24 = Financial.Year.23.24,
+    Amount_24_25 = Financial.Year.24.25,
+    Practice.Code = Practice.ID
+  ) %>%
+  mutate(
+    Note = case_when(Practice.Code == "Y00137" ~ "Practice absorbed other practices in merger", TRUE ~ Note)
+  )
+
+payment_made_table <- heq_payment_amount %>%
+  filter(row.names(heq_payment_amount) %in% c(1:131))
+
+payment_key <- heq_payment_amount %>%
+  filter(row.names(heq_payment_amount) %in% c(135:142)) %>%
+  dplyr::select(Practice.Code, Amount_21_22) %>%
+  rename(
+    Group = Practice.Code,
+    Range_of_hep_as_ppn_core_funding = Amount_21_22
+  )
+
+table_1and_2_joined <-
+  heq_practices %>%
+  full_join(payment_made_table, by = c("Practice.Code")) %>%
+  mutate(
+    Note = paste(Note.x, Note.y),
+    Note = trimws(Note)
+  ) %>%
+  dplyr::select(-Note.x, -Note.y) %>%
+  mutate(across(where(is.character), ~ na_if(., "")))
+
+## public data ---------------
+
+public_data <- read_csv("final_public_combined_130525.csv")
+
+df <- public_data %>%
+  full_join(table_1and_2_joined, by = c("PRACTICE_CODE" = "Practice.Code")) %>%
+  # this line removes one row of all NAs not sure why there
+  filter(!is.na(PRACTICE_CODE)) %>%
+  mutate(map_date = ymd(map_date))
+
+# ### counts for consort diagram
+df_06 <- df %>% filter(map_date == "2021-06-01")
+
+# qk1 <- df_06 %>% filter(icb_code == "QK1")
+# other <- df_06 %>% filter(icb_code != "QK1")
+# qk1 %>% group_by(In_scheme_21_22) %>% tally()
+# qk1 %>% group_by(Payment_21_22) %>% tally()
+
+### setting values to na
+
+#### payments data
+
+# 6 practices have missing avg_registered and avg_weighted data in 2018 - 2020 and should have all relevant payments data in those rows set to NA
+df <- df %>%
+  mutate(pay_list_bad = is.na(avg_registered) | is.na(avg_weighted) | (avg_registered == 0) | (avg_weighted == 0)) %>%
+  # If data from four key columns is missing, or avg_pay_registered is outside thresholds then remove all payments data for that practice (i.e. set all to NA) in that year
+  mutate(
+    avg_pay_registered_bad = is.na(avg_pay_registered) | ((avg_pay_registered > 550) | (avg_pay_registered < 80)),
+    covid_bad = (!is.na(covid_immun_pay) & covid_immun_pay < 0) | (!is.na(covid_support_pay) & covid_support_pay < 0) | (!is.na(covid_long_pay) & covid_long_pay < 0)
+  ) %>%
+  mutate(any_bad = pay_list_bad | avg_pay_registered_bad | is.na(avg_pay_weighted)) %>%
+  mutate(across(avg_registered:avg_pay_weighted, ~ ifelse(any_bad, NA, .x))) %>%
+  mutate(across(covid_immun_pay:covid_long_pay, ~ ifelse(covid_bad, NA, .x))) %>%
+  dplyr::select(-ends_with("bad")) %>%
+  # -97 is used for suppressed data where the unweighted or weighted base is <10 - set to NA. In 2024 data questions are combined differently so filter is <0
+  mutate(across(c(q18_12pct, q28_12pct, q90_12pct), ~ if_else(. < 0, NA, .)))
+
+# set the weighted patient values of 2024 to those of 2023 because new finance data not published
+df_2023_pay <- df %>%
+  filter(map_date == "2023-03-01") %>%
+  dplyr::select(PRACTICE_CODE, avg_weighted) %>%
+  rename(avg_weighted23 = avg_weighted)
+
+### calculate new variables
+df <- df %>%
+  left_join(df_2023_pay) %>%
+  mutate(
+    avg_weighted = case_when(
+      is.na(avg_weighted) & map_date > "2023-03-01" ~ avg_weighted23,
+      TRUE ~ avg_weighted
+    ),
+    chi = avg_weighted / avg_registered,
+    qof_percent = case_when(
+      qof_year %in% c(2021:2023) ~ (ACHIEVEMENT / 635) * 100,
+      qof_year == 2020 ~ (ACHIEVEMENT / 567) * 100,
+      qof_year %in% c(2017:2019) ~ (ACHIEVEMENT / 559) * 100
+    ),
+    total_gp_extg_fte_weighted = total_gp_extg_fte / avg_weighted * 1000,
+    total_nurses_fte_weighted = total_nurses_fte / avg_weighted * 1000,
+    total_admin_fte_weighted = total_admin_fte / avg_weighted * 1000,
+    gp_partner_hc = total_gp_sen_ptnr_hc + total_gp_ptnr_prov_hc,
+    gp_partner_1 = case_when(gp_partner_hc < 2 ~ "Single parter", TRUE ~ "Multi-partner"),
+    LLR = case_when(icb_code == "QK1" ~ "LLR", TRUE ~ "Not LLR"),
+    treated = case_when(Payment_21_22 == TRUE ~ TRUE, TRUE ~ FALSE)
+  ) %>% # additional cleaning of staffing outcomes
+  mutate(
+    total_gp_extg_fte_weighted = case_when(
+      gp_source == "Fully estimated - no data provided" ~ NA,
+      T ~ total_gp_extg_fte_weighted
+    ),
+    total_nurses_fte_weighted = case_when(
+      nurse_source == "Fully estimated - no data provided" ~ NA,
+      T ~ total_nurses_fte_weighted
+    ),
+    total_admin_fte_weighted = case_when(
+      admin_source == "Fully estimated - no data provided" ~ NA,
+      T ~ total_admin_fte_weighted
+    ),
+    gp_partner_hc = case_when(
+      gp_source == "Fully estimated - no data provided" ~ NA,
+      T ~ gp_partner_hc
+    )
+  )
+
+### exclusions
+
+# set these dates to restrict when practices open/close date exclusions are in place
+study_start <- ymd("2018-01-01")
+study_end <- ymd("2024-06-01")
+
+## make a filtering list
+excluded_llr_list <- df %>%
+  filter(!is.na(Note)) %>%
+  dplyr::select(PRACTICE_CODE) %>%
+  distinct() %>%
+  mutate(flag_excluded_llr = T)
+
+# Create flag for practices with missing or insufficient list size at any point during study period
+small_practices <- df %>%
+  filter(
+    map_date < study_end,
+    map_date > OPEN_DT,
+    map_date < CLOSE_DT | is.na(CLOSE_DT),
+    is.na(NUMBER_OF_PATIENTS) | NUMBER_OF_PATIENTS <= 500
+  ) %>%
+  dplyr::select(PRACTICE_CODE) %>%
+  distinct() %>%
+  mutate(flag_size = T)
+
+# also identify practices who are always missing number of patients
+small_practices_2 <- df %>%
+  group_by(PRACTICE_CODE) %>%
+  summarise(
+    n_rows = n(),
+    n_patients_missing = sum(is.na(NUMBER_OF_PATIENTS))
+  ) %>%
+  filter(n_rows == n_patients_missing) %>%
+  distinct() %>%
+  mutate(flag_size_empty = T)
+
+# Define list open and list close as the earliest and latest dates that a practice has at least 500 patients
+# Create flag practices with list open after 2018-01-01 or list close before 2024-06-01
+
+practices <- df %>%
+  # dplyr::select(PRACTICE_CODE, POSTCODE, OPEN_DT, CLOSE_DT) %>%
+  dplyr::select(PRACTICE_CODE, OPEN_DT, CLOSE_DT) %>%
+  distinct()
+
+open_close_dates <- df %>%
+  filter(
+    !is.na(NUMBER_OF_PATIENTS),
+    NUMBER_OF_PATIENTS > 500
+  ) %>%
+  group_by(PRACTICE_CODE) %>%
+  summarise(
+    list_open = min(map_date),
+    list_close = max(map_date)
+  ) %>%
+  ungroup() %>%
+  dplyr::select(PRACTICE_CODE, list_open, list_close) %>%
+  left_join(practices) %>% # add OPEN_DT, CLOSE_DT back in
+  filter(list_open > study_start | OPEN_DT > study_start |
+    list_close < study_end | CLOSE_DT < study_end) %>%
+  dplyr::select(PRACTICE_CODE) %>%
+  distinct() %>%
+  mutate(flag_open_close = T)
+
+# Create flag for practices with a 1 month list size change of more than 10% of the practice and at least 100 patients after being open for at least 1 year - i.e. aiming to identify practices with a sizeable change in list size that would likely have an impact on the practice running
+# look for large changes in list size once practice has been open for at least 1 year
+change_criteria <- df %>%
+  filter(
+    map_date >= OPEN_DT + years(1),
+    (map_date <= CLOSE_DT) | is.na(CLOSE_DT),
+    !is.na(NUMBER_OF_PATIENTS)
+  ) %>%
+  dplyr::select(PRACTICE_CODE, map_date, NUMBER_OF_PATIENTS) %>%
+  group_by(PRACTICE_CODE) %>%
+  arrange(map_date) %>%
+  mutate(prev_list = lag(NUMBER_OF_PATIENTS, 1)) %>%
+  ungroup() %>%
+  mutate(list_change = abs(NUMBER_OF_PATIENTS - prev_list)) %>%
+  filter(
+    !is.na(prev_list),
+    list_change > 100, # change of at least 100 patients
+    100 * list_change / prev_list > 10
+  ) %>% # % change of at least 10
+  dplyr::select(PRACTICE_CODE) %>%
+  distinct() %>%
+  mutate(flag_size_change = T)
+
+# Create filtered dataset of practices in LLR that weren't treated
+treatment_status <- df %>%
+  filter(Payment_21_22 == FALSE) %>%
+  dplyr::select(PRACTICE_CODE) %>%
+  distinct() %>%
+  mutate(flag_llr_untreated = T)
+
+# Create filtered dataset of practices with >60% registered list male at any time during the study period?
+male_60 <- df %>%
+  filter(
+    map_date < study_end,
+    map_date > OPEN_DT,
+    map_date < CLOSE_DT | is.na(CLOSE_DT),
+    PERC_MALE > 60
+  ) %>%
+  dplyr::select(PRACTICE_CODE) %>%
+  distinct() %>%
+  mutate(flag_male_perc = T)
+
+# add all the flagged datasets together
+removed_practices <- excluded_llr_list %>%
+  full_join(small_practices) %>%
+  full_join(small_practices_2) %>%
+  full_join(open_close_dates) %>%
+  full_join(change_criteria) %>%
+  # full_join(treatment_status) %>%
+  full_join(male_60)
+
+removed_practices_summary <- removed_practices %>%
+  inner_join(dplyr::select(df_06, Payment_21_22, icb_code, PRACTICE_CODE)) %>%
+  mutate(
+    LLR = case_when(icb_code == "QK1" ~ "LLR", TRUE ~ "Not LLR"),
+    any_category = if_any(.cols = contains("flag"))
+  )
+
+removed_practices_summary %>%
+  group_by(LLR, any_category) %>%
+  tally()
+
+practice_list_rem <- df %>%
+  dplyr::select(PRACTICE_CODE, treated, LLR, map_date) %>%
+  filter(map_date == "2021-06-01") %>%
+  left_join(treatment_status, by = "PRACTICE_CODE") %>%
+  left_join(removed_practices, by = "PRACTICE_CODE") %>%
+  group_by(LLR, treated) %>%
+  summarise(
+    n = n(),
+    n_flag_size = sum(flag_size, na.rm = T),
+    n_flag_size_empty = sum(flag_size_empty, na.rm = T),
+    n_flag_llr_untreated = sum(flag_llr_untreated, na.rm = T),
+    n_flag_excluded_llr = sum(flag_excluded_llr, na.rm = T),
+    n_flag_open_close = sum(flag_open_close, na.rm = T),
+    n_flag_size_change = sum(flag_size_change, na.rm = T),
+    n_flag_male_perc = sum(flag_male_perc, na.rm = T)
+  )
+
+clean_df <- df %>%
+  filter(!(PRACTICE_CODE %in% removed_practices$PRACTICE_CODE))
+
+# ### counts for consort diagrams
+df_clean_06 <- clean_df %>% filter(map_date == "2021-06-01")
+# 
+# qk1 <- df_06 %>% filter(icb_code == "QK1")
+# other <- df_06 %>% filter(icb_code != "QK1")
+# qk1 %>% group_by(In_scheme_21_22) %>% tally()
+# qk1 %>% group_by(Payment_21_22) %>% tally()
+
+# inequalities consort diagram
+# n_start <- public_data %>% select(PRACTICE_CODE) %>% n_distinct(na.rm = T)
+# n_size <- removed_practices %>% filter(flag_size | flag_size_empty) %>% select(PRACTICE_CODE) %>% n_distinct(na.rm = T)
+# n_open_close <- removed_practices %>% filter(is.na(flag_size), is.na(flag_size_empty), flag_open_close) %>% select(PRACTICE_CODE) %>% n_distinct(na.rm = T)
+# n_size_change <- removed_practices %>% filter(is.na(flag_size), is.na(flag_size_empty), is.na(flag_open_close), flag_size_change) %>% select(PRACTICE_CODE) %>% n_distinct(na.rm = T)
+# n_male <- removed_practices %>% filter(is.na(flag_size), is.na(flag_size_empty), is.na(flag_open_close), is.na(flag_size_change), flag_male_perc) %>% select(PRACTICE_CODE) %>% n_distinct(na.rm = T)
+
+
+# add cleaned quintiles fixed at point of intervention (June 2021)
+clean_fixed_quintiles <- clean_df %>%
+  filter(map_date == ymd("2021-06-01")) %>%
+  mutate(clean_quintile = 6 - ntile(IMD_score, 5)) %>%
+  dplyr::select(PRACTICE_CODE, clean_quintile)
+
+clean_df <- clean_df %>%
+  left_join(clean_fixed_quintiles, by = join_by("PRACTICE_CODE"), relationship = "many-to-one")
+
+### only select variables being used in the matching/descriptives/inequalities work
+
+variables <- c(
+  "PRACTICE_CODE", "LLR", "treated",
+  "map_date",
+  "NUMBER_OF_PATIENTS", "PERC_MALE", "PERC_65", "chi",
+  "POP_WHITE", "POP_ENG2", "POP_NOENG", "POP_RURAL", "icb_code", "sub_icb_code",
+  "total_gp_extg_fte_weighted", "total_nurses_fte_weighted", "total_admin_fte_weighted", 
+  "gp_partner_1",
+  "survey_year", "q18_12pct", "q28_12pct", "q90_12pct",
+  "gpcontactoverall_1_pct", "lastgpapptneeds_1_pct", "overallexp_1_pct",
+  "qof_year", "ACHIEVEMENT", "qof_percent", 
+  "AST", "CHD", "CKD", "COPD", "DM", "HYP",
+  "IMD_score", "clean_quintile", "pay_year", "contract_type",
+  "avg_registered", "avg_weighted", "avg_pay_registered", "avg_pay_weighted"
+)
+
+clean_df <-
+  clean_df %>%
+  dplyr::select(all_of(variables))
+
+## filter for pre intervention and post-intervention dates
+baseline <- clean_df %>%
+  filter(map_date == "2021-06-01") %>%
+  dplyr::select(-c("gpcontactoverall_1_pct", "lastgpapptneeds_1_pct", "overallexp_1_pct", "qof_percent"))
+
+baseline_qof <- clean_df %>%
+  filter(map_date == "2018-06-01") %>%
+  dplyr::select(PRACTICE_CODE, qof_percent)
+
+baseline_joined <-
+  baseline %>%
+  left_join(baseline_qof)
+
+## outcomes using 2024 data
+outcomes_2024 <- clean_df %>%
+  filter(map_date == "2024-01-01") %>%
+  dplyr::select(PRACTICE_CODE, q18_12pct, q28_12pct, q90_12pct, gpcontactoverall_1_pct, lastgpapptneeds_1_pct, overallexp_1_pct) %>%
+  rename_at(vars(-PRACTICE_CODE), ~ paste0(., "_POST_INT"))
+
+outcomes_2024_staff <- clean_df %>%
+  filter(map_date == "2023-04-01") %>%
+  dplyr::select(PRACTICE_CODE, total_gp_extg_fte_weighted, total_nurses_fte_weighted, total_admin_fte_weighted) %>%
+  rename_at(vars(-PRACTICE_CODE), ~ paste0(., "_POST_INT"))
+
+## outcome using earlier data - QOF uses 22/23 instead of 23/24
+outcomes_2024_qof <- clean_df %>%
+  filter(map_date == "2023-03-01") %>%
+  dplyr::select(PRACTICE_CODE, qof_percent) %>%
+  rename_at(vars(-PRACTICE_CODE), ~ paste0(., "_POST_INT")) %>%
+  left_join(outcomes_2024) %>%
+  left_join(outcomes_2024_staff)
+
+outcomes_2023 <- clean_df %>%
+  filter(map_date == "2023-05-01") %>%
+  dplyr::select(
+    PRACTICE_CODE, LLR, treated, q18_12pct, q28_12pct, q90_12pct, ACHIEVEMENT,
+    total_gp_extg_fte_weighted, total_nurses_fte_weighted, total_admin_fte_weighted
+  ) %>%
+  rename_at(vars(-PRACTICE_CODE, -LLR, -treated), ~ paste0(., "_POST_INT"))
+
+final_clean <- clean_df %>%
+  filter(
+    !is.na(map_date),
+    !is.na(NUMBER_OF_PATIENTS)
+  )
+
+### save cleaned files ------------
+
+saveRDS(table_1and_2_joined, "cleaned_data/practice_payments_cleaned.rds")
+
+saveRDS(payment_key, "cleaned_data/payment_key.rds")
+
+saveRDS(baseline_joined, "cleaned_data/baseline_data.rds")
+
+saveRDS(outcomes_2024_qof, "cleaned_data/outcomes_2024.rds")
+
+saveRDS(outcomes_2023, "cleaned_data/outcomes_2023.rds")
+
+saveRDS(final_clean, "cleaned_data/complete_cleaned.rds")
