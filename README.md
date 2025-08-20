@@ -2,4 +2,7 @@
 
 Both papers use the output of the code in extract_data and run this through clean_data.R.
 
+The folder 'causal' contains code for Opie-Martin te al., and the folder 'inequalities' contains code for Whitfield et al.,
+
+
 
