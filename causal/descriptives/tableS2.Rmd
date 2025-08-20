@@ -1,0 +1,105 @@
+---
+title: "table 1"
+author: "Sarah Opie-Martin"
+date: "2025-02-26"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+
+source("~/casual/preamble.R")
+
+set_flextable_defaults(
+  font.size = 12, font.family = "Open Sans",
+  font.color = "#333333",
+  table.layout = "fixed",
+  border.color = "gray",
+  padding.top = 3, padding.bottom = 3,
+  padding.left = 4, padding.right = 4
+)
+
+
+
+baseline <- readRDS("cleaned_data/baseline_data.rds")
+payments <- readRDS("cleaned_data/practice_payments_cleaned.rds")
+
+
+baseline <- baseline %>%
+  left_join(payments, by = c("PRACTICE_CODE" = "Practice.Code")) %>%
+  filter(In_scheme_21_22 == TRUE) %>%
+  mutate(
+    status = case_when(Payment_21_22 == TRUE ~ "Received HEP", TRUE ~ "Did not receive HEP"),
+    status = factor(status, levels = c("Received HEP", "Did not receive HEP")),
+    IMD_quintile_fct = as.factor(clean_quintile)
+  ) %>%
+  mutate(
+    across(c(q18_12pct, q28_12pct, q90_12pct), ~ . * 100)
+  )
+```
+
+## Table 1
+
+```{r overall_t1}
+print("### Mean demographics practices recieving funding v those not in LLR - does not include 7 practices that were involved in mergers (May 2021)")
+print("N.B. Here 1 is most deprived IMD fifth, 5 is least deprived")
+# strata <- c(list(Total = baseline), split(baseline, baseline$LLR_not_ROE))
+labels <- list(
+  variables = list(
+    NUMBER_OF_PATIENTS = "List size", # in
+    PERC_MALE = "Percentage of registered patients are male", # in
+    PERC_65 = "Percentage of registered patients are >65 years old", # in
+    IMD_quintile_fct = "IMD quintile based on registered patient place of residence", # in
+    POP_RURAL = "Percentage of registered patients living in rural areas", # in
+    POP_WHITE = "Percentage of white people living in LSOAs of registered patients", # in
+    POP_ENG2 = "Percentage of people with English as a second language living in LSOAs of registered patients", # in
+    chi = "Carr-Hill Index", # in
+    total_gp_extg_fte_weighted = "FTE GPs (excluding training grade) per 1000 weighted patients", # in
+    total_nurses_fte_weighted = "FTE nurses per 1000 weighted patients", # in
+    total_admin_fte_weighted = "FTE admin per 1000 weighted patients", # in
+    gp_partner_1 = "Single partner practices",
+    contract_type = "Contract type",
+    q18_12pct = "Percentage of respondents reporting good overall experience of booking an appointment", # in
+    q28_12pct = "Percentage of respondents reporting good overall experience of their GP practice", # in
+    q90_12pct = "Percentage of respondents reporting yes overall to whether their needs were met at their last appointment", # in
+    qof_percent = "Percentage of total QOF points achieved", # in
+    AST = "Prevalence of asthma", # in
+    CKD = "Prevalence of chronic kidney disease", # in
+    COPD = "Prevalence of chronic obstructive pulmonary disease", # in
+    CHD = "Prevalence of coronary heart disease", # in
+    DM = "Prevalence of diabetes mellitus", # in
+    HYP = "Prevalence of hypertension" # in
+  )
+)
+
+
+
+
+
+
+# my.render.cont <- function(x) {
+# with(stats.apply.rounding(stats.default(x), digits = 2),
+# c("", "Mean (SD)" =sprintf("%s(&plusmn; %s)", MEAN, SD)))
+# }
+
+# my.render.cat <- function(x) {
+# c("", sapply(stats.default(x), function(y) with(y, sprintf("%d (%0.0f %%)", FREQ, PCT))))
+# }
+
+# table_1 <- table1(strata_sub, labels, render.continuous = my.render.cont, render.categorical=my.render.cat)
+
+# , render.continuous = my.render.cont, render.categorical=my.render.cat)
+
+# t1flex(table_1, tablefn = "flextable")
+
+# table_1_sub <- table1(strata_sub, labels)
+```
+
+```{r subgroup_t1}
+strata_sub <- c(list(Total = baseline), split(baseline, baseline$status))
+
+table_1_sub <- table1(strata_sub, labels)
+
+t1flex(table_1_sub, tablefn = "flextable")
+```
